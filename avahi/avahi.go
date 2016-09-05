@@ -18,7 +18,6 @@
 package avahi
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"os"
@@ -26,34 +25,19 @@ import (
 	"sync"
 	"time"
 
-	"github.com/davecheney/mdns"
+	"github.com/presotto/go-mdns-sd"
 )
 
 var logger *log.Logger
 
+var _mdns *mdns.MDNS
+
 var initOnce sync.Once
 
-const (
-	hostnameLocalhost = "localhost"
-	hostnameWedbm     = "webdm"
-)
+const hostnameLocalhost = "localhost"
+const hostnameDefault   = "webdm"
 
-const timeoutMinutes = 10
-const inAddr = `%s.local. 60 IN A %s`
-const inPtr = `%s.in-addr.arpa. 60 IN PTR %s.local.`
-
-var mdnsPublish = mdns.Publish
-
-func tryPublish(hostname, ip string) {
-	rr := fmt.Sprintf(inAddr, hostname, ip)
-
-	logger.Println("Publishing", rr)
-
-	if err := mdnsPublish(rr); err != nil {
-		logger.Printf(`Unable to publish record "%s": %v`, rr, err)
-		return
-	}
-}
+const timeoutDuration = 3 * time.Second
 
 var netInterfaceAddrs = net.InterfaceAddrs
 
@@ -70,52 +54,43 @@ func ipAddrs() (addrs []net.Addr, err error) {
 	return addrs, nil
 }
 
-// Init initializes the avahi subsystem.
 func Init(l *log.Logger) {
 	logger = l
 
+	var err error
+	hostname := getHostname()
+	logger.Println("Registering hostname:", hostname)
+	_mdns, err = mdns.NewMDNS(hostname, "", "", false, 1)
+	if err != nil {
+		logger.Println("Cannot create MDNS instance:", err)
+		return
+	}
 	initOnce.Do(timeoutLoop)
 }
 
 func timeoutLoop() {
-	timeout := time.NewTimer(timeoutMinutes * time.Minute)
+	timer := time.NewTimer(timeoutDuration)
 
 	for {
-		loop()
-		timeout.Reset(timeoutMinutes * time.Minute)
-		<-timeout.C
-	}
-}
-
-var osHostname = os.Hostname
-
-func loop() {
-	addrs, err := ipAddrs()
-	if err != nil {
-		logger.Println("Cannot obtain IP addresses:", err)
-		return
-	}
-
-	hostname, err := osHostname()
-	if err != nil {
-		logger.Println("Cannot obtain hostname:", err)
-		return
-	}
-
-	if strings.ContainsRune(hostname, '.') {
-		hostname = strings.Split(hostname, ".")[0]
-	}
-
-	if hostname == hostnameLocalhost {
-		hostname = hostnameWedbm
-	}
-
-	for _, ip := range addrs {
-		ip := strings.Split(ip.String(), "/")[0]
-		if strings.HasPrefix(ip, "127.") {
-			continue
+		if _mdns != nil {
+			_mdns.ScanInterfaces()
 		}
-
-		tryPublish(hostname, ip)
+		loop()
+		timer.Reset(timeoutDuration)
+		<-timer.C
 	}
 }
+
+func getHostname() (hostname string) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		logger.Println("Cannot obtain hostname, using default:", err)
+		return hostnameDefault
+	}
+	hostname = strings.Split(hostname, ".")[0]
+	if hostname == hostnameLocalhost {
+		hostname = hostnameDefault
+	}
+	return hostname
+}
+
